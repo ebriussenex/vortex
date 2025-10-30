@@ -169,4 +169,16 @@ mod tests {
                 assert_eq!(parse_int(input), Err(DecodeErr::LeadingZeroInt));
             });
     }
+
+    #[test]
+    fn err_no_endtag_int() {
+        assert_eq!(parse_int(b"i123"), Err(DecodeErr::IntNotContainEndTag));
+    }
+
+    #[test]
+    fn err_invalid_int() {
+        [&b"ie"[..], &b"ihhhhhe"[..]]
+            .iter()
+            .for_each(|input| assert_eq!(parse_int(input), Err(DecodeErr::InvalidInt)));
+    }
 }
