@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+#[derive(Debug, PartialEq)]
 pub enum DecodeErr {
     StrNotContainColon,
     TrailingData,
@@ -11,7 +12,7 @@ pub enum DecodeErr {
 
 type ParseResult<'a, T> = Result<(T, &'a [u8]), DecodeErr>;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum Bencoded {
     Integer(i64),
     ByteStr(String),
@@ -55,5 +56,39 @@ fn parse_bytestr(input: &[u8]) -> ParseResult<'_, Bencoded> {
             .map_err(DecodeErr::InvalidUtf8)?
             .to_string();
         Ok((Bencoded::ByteStr(str), &input[start + strlen..]))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_valid_bytestr() {
+        let input = b"4:spamrest";
+        let (val, rest) = parse_bytestr(input).expect("should parse");
+        assert_eq!(val, Bencoded::ByteStr("spam".to_string()));
+        assert_eq!(rest, b"rest");
+    }
+
+    #[test]
+    fn bytestr_no_col() {
+        let input = b"4spamrest";
+        let res = parse_bytestr(input);
+        assert_eq!(res, Err(DecodeErr::StrNotContainColon));
+    }
+
+    #[test]
+    fn bytestr_no_content() {
+        let input = b"4:";
+        let res = parse_bytestr(input);
+        assert_eq!(res, Err(DecodeErr::InvalidStrLen));
+    }
+
+    #[test]
+    fn bytestr_badlen() {
+        let input = b"5:spam";
+        let res = parse_bytestr(input);
+        assert_eq!(res, Err(DecodeErr::InvalidStrLen));
     }
 }
