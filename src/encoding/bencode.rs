@@ -25,9 +25,9 @@ type ParseResult<'a, T> = Result<(T, &'a [u8]), DecodeErr>;
 #[derive(Debug, PartialEq)]
 pub enum Bencoded {
     Integer(i64),
-    ByteStr(String),
+    ByteStr(Vec<u8>),
     List(Vec<Bencoded>),
-    Dict(BTreeMap<String, Bencoded>),
+    Dict(BTreeMap<Vec<u8>, Bencoded>),
 }
 
 pub fn decode(input: &[u8]) -> ParseResult<'_, Bencoded> {
@@ -50,8 +50,8 @@ fn parse_bencode(input: &[u8]) -> ParseResult<'_, Bencoded> {
     }
 }
 
-fn parse_dict(input: &[u8]) -> ParseResult<'_, BTreeMap<String, Bencoded>> {
-    let mut res: BTreeMap<String, Bencoded> = BTreeMap::new();
+fn parse_dict(input: &[u8]) -> ParseResult<'_, BTreeMap<Vec<u8>, Bencoded>> {
+    let mut res: BTreeMap<Vec<u8>, Bencoded> = BTreeMap::new();
     let mut rest = &input[1..];
 
     while !rest.starts_with(b"e") {
@@ -121,7 +121,7 @@ fn parse_int(input: &[u8]) -> ParseResult<'_, i64> {
     Ok((bint, &input[e_pos + 1..]))
 }
 
-fn parse_bytestr(input: &[u8]) -> ParseResult<'_, String> {
+fn parse_bytestr(input: &[u8]) -> ParseResult<'_, Vec<u8>> {
     let col_pos = input
         .iter()
         .position(|&b| b == b':')
@@ -136,10 +136,8 @@ fn parse_bytestr(input: &[u8]) -> ParseResult<'_, String> {
     if input.len() < start + strlen {
         Err(DecodeErr::InvalidStrLen)
     } else {
-        let str = std::str::from_utf8(&input[start..start + strlen])
-            .map_err(DecodeErr::InvalidUtf8)?
-            .to_string();
-        Ok((str, &input[start + strlen..]))
+        let str = &input[start..start + strlen].to_vec();
+        Ok((str.to_owned(), &input[start + strlen..]))
     }
 }
 
@@ -152,7 +150,7 @@ mod tests {
     fn parse_valid_bytestr() {
         let input = b"4:spamrest";
         let (val, rest) = parse_bytestr(input).expect("should parse");
-        assert_eq!(val, "spam".to_string());
+        assert_eq!(val, b"spam".to_vec());
         assert_eq!(rest, b"rest");
     }
 
@@ -263,7 +261,7 @@ mod tests {
     fn list_with_bytes() {
         let input = b"l4:spame";
         let (val, rest) = parse_list(input).unwrap();
-        assert_eq!(val, vec![Bencoded::ByteStr("spam".to_string())]);
+        assert_eq!(val, vec![Bencoded::ByteStr(b"spam".to_vec())]);
         assert_eq!(rest, b"");
     }
 
@@ -302,11 +300,11 @@ mod tests {
         let input = b"li42el5:inneri100eed3:key5:valueee";
         let (val, rest) = parse_list(input).unwrap();
         let mut dict = std::collections::BTreeMap::new();
-        dict.insert("key".to_string(), Bencoded::ByteStr("value".to_string()));
+        dict.insert(b"key".to_vec(), Bencoded::ByteStr(b"value".to_vec()));
         let expected = vec![
             Bencoded::Integer(42),
             Bencoded::List(vec![
-                Bencoded::ByteStr("inner".to_string()),
+                Bencoded::ByteStr(b"inner".to_vec()),
                 Bencoded::Integer(100),
             ]),
             Bencoded::Dict(dict),
@@ -329,10 +327,13 @@ mod tests {
         let input = b"d3:cow3:moo4:spam4:eggse";
         let (dict, rest) = parse_dict(input).unwrap();
         assert_eq!(dict.len(), 2);
-        assert_eq!(dict.get("cow"), Some(&Bencoded::ByteStr("moo".to_string())));
         assert_eq!(
-            dict.get("spam"),
-            Some(&Bencoded::ByteStr("eggs".to_string()))
+            dict.get(b"cow".as_slice()),
+            Some(&Bencoded::ByteStr(b"moo".to_vec()))
+        );
+        assert_eq!(
+            dict.get(b"spam".as_slice()),
+            Some(&Bencoded::ByteStr(b"eggs".to_vec()))
         );
         assert_eq!(rest, b"");
     }
@@ -342,13 +343,13 @@ mod tests {
         let input = b"d4:name5:Alice3:agei30e5:adminl4:trueee";
         let (dict, rest) = parse_dict(input).expect("should parse");
         assert_eq!(
-            dict.get("name"),
-            Some(&Bencoded::ByteStr("Alice".to_string()))
+            dict.get(b"name".as_slice()),
+            Some(&Bencoded::ByteStr(b"Alice".to_vec()))
         );
-        assert_eq!(dict.get("age"), Some(&Bencoded::Integer(30)));
+        assert_eq!(dict.get(b"age".as_slice()), Some(&Bencoded::Integer(30)));
         assert_eq!(
-            dict.get("admin"),
-            Some(&Bencoded::List(vec![Bencoded::ByteStr("true".to_string())]))
+            dict.get(b"admin".as_slice()),
+            Some(&Bencoded::List(vec![Bencoded::ByteStr(b"true".to_vec())]))
         );
         assert_eq!(rest, b"");
     }
@@ -357,12 +358,12 @@ mod tests {
     fn nested_dict() {
         let input = b"d5:outerd5:inner5:valueee";
         let (dict, rest) = parse_dict(input).expect("should parse");
-        let inner = dict.get("outer").unwrap();
+        let inner = dict.get(b"outer".as_slice()).unwrap();
         match inner {
             Bencoded::Dict(inner_map) => {
                 assert_eq!(
-                    inner_map.get("inner"),
-                    Some(&Bencoded::ByteStr("value".to_string()))
+                    inner_map.get(&b"inner".to_vec()),
+                    Some(&Bencoded::ByteStr(b"value".to_vec()))
                 );
             }
             _ => panic!("Expected nested dict"),
@@ -375,8 +376,8 @@ mod tests {
         let input = b"d3:key5:valueeTRAILING";
         let (dict, rest) = parse_dict(input).unwrap();
         assert_eq!(
-            dict.get("key"),
-            Some(&Bencoded::ByteStr("value".to_string()))
+            dict.get(b"key".as_slice()),
+            Some(&Bencoded::ByteStr(b"value".to_vec()))
         );
         assert_eq!(rest, b"TRAILING");
     }
@@ -406,7 +407,10 @@ mod tests {
     fn dict_with_empty_key() {
         let input = b"d0:5:valuee";
         let (dict, rest) = parse_dict(input).unwrap();
-        assert_eq!(dict.get(""), Some(&Bencoded::ByteStr("value".to_string())));
+        assert_eq!(
+            dict.get(b"".as_slice()),
+            Some(&Bencoded::ByteStr(b"value".to_vec()))
+        );
         assert_eq!(rest, b"");
     }
 }
