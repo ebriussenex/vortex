@@ -88,9 +88,9 @@ struct SingleFileInfo {
 
 #[derive(Debug, Clone)]
 struct MultipleFilesInfo {
-    // List of dicts with lengths and paths
+    /// List of dicts with lengths and paths
     files: Vec<FilesEntry>,
-    // Dir name
+    /// Dir name
     name: String,
 }
 
