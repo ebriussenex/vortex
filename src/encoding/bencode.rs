@@ -18,11 +18,14 @@ pub enum DecodeErr {
     DictNotContainEndTag,
     DictInvalidValue(Box<DecodeErr>),
     DictNonUniqKey,
+    IsNotDict,
+    IsNotBytestr,
+    IsNotList,
 }
 
 type ParseResult<'a, T> = Result<(T, &'a [u8]), DecodeErr>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Bencoded {
     Integer(i64),
     ByteStr(Vec<u8>),
@@ -30,13 +33,42 @@ pub enum Bencoded {
     Dict(BTreeMap<Vec<u8>, Bencoded>),
 }
 
-pub fn decode(input: &[u8]) -> ParseResult<'_, Bencoded> {
+impl Bencoded {
+    pub fn extract_dict(&self) -> Result<BTreeMap<Vec<u8>, Bencoded>, DecodeErr> {
+        match self {
+            Bencoded::Dict(dict) => Ok(dict.clone()),
+            _ => Err(DecodeErr::IsNotDict),
+        }
+    }
+
+    pub fn extract_bytestr(&self) -> Result<Vec<u8>, DecodeErr> {
+        match self {
+            Bencoded::ByteStr(bstr) => Ok(bstr.clone()),
+            _ => Err(DecodeErr::IsNotBytestr),
+        }
+    }
+
+    pub fn extract_int(&self) -> Result<i64, DecodeErr> {
+        match self {
+            Bencoded::Integer(n) => Ok(*n),
+            _ => Err(DecodeErr::IsNotBytestr),
+        }
+    }
+
+    pub fn extract_list(&self) -> Result<Vec<Bencoded>, DecodeErr> {
+        match self {
+            Bencoded::List(l) => Ok(l.to_vec()),
+            _ => Err(DecodeErr::IsNotList),
+        }
+    }
+}
+
+pub fn decode_single(input: &[u8]) -> Result<Bencoded, DecodeErr> {
     let (val, rest) = parse_bencode(input)?;
     if !rest.is_empty() {
-        Err(DecodeErr::TrailingData)
-    } else {
-        Ok((val, rest))
+        return Err(DecodeErr::TrailingData);
     }
+    Ok(val)
 }
 
 fn parse_bencode(input: &[u8]) -> ParseResult<'_, Bencoded> {
