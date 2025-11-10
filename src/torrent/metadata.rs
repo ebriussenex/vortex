@@ -54,9 +54,9 @@ enum InfoFilesParseErr {
 #[derive(Debug, Clone)]
 pub struct Torrent {
     /// Announce url
-    announce: url::Url,
+    pub announce: url::Url,
     /// Info dictionary
-    info: Info,
+    pub info: Info,
 }
 
 #[derive(Debug, Clone)]
@@ -69,7 +69,7 @@ struct Info {
     /// possibly the last one which may be truncated.
     /// SHA-1 is 160 bit. 40 hex digits.
     pieces: Vec<[u8; 20]>,
-    info_mode: InfoMode,
+    pub info_mode: InfoMode,
 }
 
 #[derive(Debug, Clone)]
@@ -81,25 +81,25 @@ enum InfoMode {
 #[derive(Debug, Clone)]
 struct SingleFileInfo {
     /// Suggested name to save file/dir as. UTF-8 encoded.
-    name: String,
+    pub name: String,
     /// Size of the file in bytes.
-    length: usize,
+    pub length: usize,
 }
 
 #[derive(Debug, Clone)]
 struct MultipleFilesInfo {
     /// List of dicts with lengths and paths
-    files: Vec<FilesEntry>,
+    pub files: Vec<FilesEntry>,
     /// Dir name
-    name: String,
+    pub name: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct FilesEntry {
     /// Size of file in bytes
-    length: usize,
+    pub length: usize,
     /// Dirname or filename if it's last entry
-    path: Vec<String>,
+    pub path: Vec<String>,
 }
 
 pub fn parse_torrent(torrent_file: &[u8]) -> Result<Torrent, TorrentFileErr> {
@@ -231,4 +231,42 @@ fn parse_multifile_info(files_list: Vec<Bencoded>) -> Result<Vec<FilesEntry>, In
                 })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_multifile_torrent() {
+        let multifile_torrent = include_bytes!("./testdata/test_multi.torrent");
+        let torrent = parse_torrent(multifile_torrent).expect("failed to parse");
+
+        assert_eq!(
+            torrent.announce.as_str(),
+            "udp://tracker.opentrackr.org:1337/announce"
+        );
+
+        let info = torrent.info;
+        assert_eq!(info.piece_len, 262144); // 2^18, 256 KiB
+
+        assert!(!info.pieces.is_empty());
+
+        match info.info_mode {
+            InfoMode::SingleFile(_) => panic!("expected multifile"),
+            InfoMode::MultipleFiles(multif) => {
+                assert_eq!(multif.name, "outer");
+                assert_eq!(multif.files.len(), 2);
+
+                assert!(
+                    multif
+                        .files
+                        .iter()
+                        .any(|file| file.path == vec!["innera", "innerb", "strange_file.md"])
+                );
+
+                assert!(multif.files.iter().any(|file| file.path == ["a.txt"]));
+            }
+        }
+    }
 }
