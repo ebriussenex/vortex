@@ -269,4 +269,26 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn simple_singlefile_torrent() {
+        let multifile_torrent = include_bytes!("./testdata/test_single.torrent");
+        let torrent = parse_torrent(multifile_torrent).expect("failed to parse");
+
+        assert_eq!(
+            torrent.announce.as_str(),
+            "udp://tracker.opentrackr.org:1337/announce"
+        );
+
+        let info = torrent.info;
+        assert_eq!(info.piece_len, 262144); // 2^18, 256 KiB
+
+        match info.info_mode {
+            InfoMode::SingleFile(singlef) => {
+                assert_eq!(singlef.name, "single.txt");
+                assert_eq!(singlef.length, 0);
+            }
+            InfoMode::MultipleFiles(_) => panic!("expected singlefile"),
+        }
+    }
 }
