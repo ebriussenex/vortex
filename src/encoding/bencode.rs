@@ -1,4 +1,6 @@
-use std::collections::BTreeMap;
+use std::{collections::HashMap, io};
+
+use anyhow::{Context, Error};
 
 #[derive(Debug, PartialEq)]
 pub enum DecodeErr {
@@ -30,11 +32,11 @@ pub enum Bencoded {
     Integer(i64),
     ByteStr(Vec<u8>),
     List(Vec<Bencoded>),
-    Dict(BTreeMap<Vec<u8>, Bencoded>),
+    Dict(HashMap<Vec<u8>, Bencoded>),
 }
 
 impl Bencoded {
-    pub fn extract_dict(&self) -> Result<BTreeMap<Vec<u8>, Bencoded>, DecodeErr> {
+    pub fn extract_dict(&self) -> Result<HashMap<Vec<u8>, Bencoded>, DecodeErr> {
         match self {
             Bencoded::Dict(dict) => Ok(dict.clone()),
             _ => Err(DecodeErr::IsNotDict),
@@ -61,6 +63,64 @@ impl Bencoded {
             _ => Err(DecodeErr::IsNotList),
         }
     }
+
+    pub fn encode(&self) -> Result<Vec<u8>, io::Error> {
+        match self {
+            Bencoded::Integer(num) => encode_int(*num),
+            Bencoded::ByteStr(bstr) => encode_bytestr(bstr),
+            Bencoded::List(items) => encode_list(items),
+            Bencoded::Dict(dict) => encode_dict(dict),
+        }
+    }
+}
+
+fn encode_int(num: i64) -> Result<Vec<u8>, io::Error> {
+    let mut buf = Vec::new();
+
+    buf.push(b'i');
+
+    use std::io::Write;
+    write!(&mut buf, "{}", num)?;
+
+    buf.push(b'e');
+    Ok(buf)
+}
+
+fn encode_bytestr(bstr: &[u8]) -> Result<Vec<u8>, io::Error> {
+    let mut buf = Vec::new();
+
+    use std::io::Write;
+    write!(&mut buf, "{}:", bstr.len())?;
+
+    buf.extend_from_slice(bstr);
+
+    Ok(buf)
+}
+
+fn encode_dict(dict: &HashMap<Vec<u8>, Bencoded>) -> Result<Vec<u8>, io::Error> {
+    let mut buf = Vec::new();
+
+    buf.push(b'd');
+    for (k, v) in dict {
+        buf.extend_from_slice(&encode_bytestr(k)?);
+        buf.extend_from_slice(&v.encode()?);
+    }
+    buf.push(b'e');
+
+    Ok(buf)
+}
+
+fn encode_list(items: &Vec<Bencoded>) -> Result<Vec<u8>, io::Error> {
+    let mut buf = Vec::new();
+
+    buf.push(b'l');
+    items.iter().try_for_each(|it| {
+        buf.extend_from_slice(&it.encode()?);
+        Ok::<(), io::Error>(())
+    })?;
+    buf.push(b'e');
+
+    Ok(buf)
 }
 
 pub fn decode_single(input: &[u8]) -> Result<Bencoded, DecodeErr> {
@@ -82,8 +142,8 @@ fn parse_bencode(input: &[u8]) -> ParseResult<'_, Bencoded> {
     }
 }
 
-fn parse_dict(input: &[u8]) -> ParseResult<'_, BTreeMap<Vec<u8>, Bencoded>> {
-    let mut res: BTreeMap<Vec<u8>, Bencoded> = BTreeMap::new();
+fn parse_dict(input: &[u8]) -> ParseResult<'_, HashMap<Vec<u8>, Bencoded>> {
+    let mut res: HashMap<Vec<u8>, Bencoded> = HashMap::new();
     let mut rest = &input[1..];
 
     while !rest.starts_with(b"e") {
@@ -331,7 +391,7 @@ mod tests {
     fn list_complex_nested_structure() {
         let input = b"li42el5:inneri100eed3:key5:valueee";
         let (val, rest) = parse_list(input).unwrap();
-        let mut dict = std::collections::BTreeMap::new();
+        let mut dict = std::collections::HashMap::new();
         dict.insert(b"key".to_vec(), Bencoded::ByteStr(b"value".to_vec()));
         let expected = vec![
             Bencoded::Integer(42),
@@ -444,5 +504,21 @@ mod tests {
             Some(&Bencoded::ByteStr(b"value".to_vec()))
         );
         assert_eq!(rest, b"");
+    }
+
+    // encode
+    #[test]
+    fn encoding_int() {
+        let num: i64 = 1234795123;
+        assert_eq!(encode_int(num).expect("expect to encode"), b"i1234795123e");
+    }
+
+    #[test]
+    fn encoding_bytestr() {
+        let bstr = b"hello";
+        assert_eq!(
+            encode_bytestr(bstr).expect("expected to encode"),
+            b"5:hello"
+        );
     }
 }

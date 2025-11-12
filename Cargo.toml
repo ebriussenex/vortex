@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.100"
 url = "2.5.7"
+sha1 = "0.10.6"

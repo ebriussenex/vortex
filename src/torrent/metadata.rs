@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::{collections::HashMap, io};
 
+use sha1::{Digest, Sha1};
 use url::Url;
 
 use crate::encoding::bencode::{Bencoded, DecodeErr, decode_single};
@@ -15,6 +16,8 @@ enum TorrentFileErr {
     AnnounceValContainsNonUTF8,
     AnnounceLinkInvalidUrl(url::ParseError),
     InfoParseErr(InfoParseErr),
+    InfoHashEncodingFailed(io::Error),
+    InfoHashHashingFailed(),
 }
 
 #[derive(Debug)]
@@ -33,7 +36,6 @@ enum InfoParseErr {
     PicesNotByteStr,
     PiecesLenNotMultipleOf20,
     FilesNotList,
-    FilesListEntryNotDict,
     FilesParseErr(InfoFilesParseErr),
 }
 
@@ -57,6 +59,8 @@ pub struct Torrent {
     pub announce: url::Url,
     /// Info dictionary
     pub info: Info,
+    /// SHA-1 hash of bencoded info dict. Info dict been taken from initial .torrent file.
+    pub info_hash: [u8; 20],
 }
 
 #[derive(Debug, Clone)]
@@ -120,19 +124,32 @@ pub fn parse_torrent(torrent_file: &[u8]) -> Result<Torrent, TorrentFileErr> {
     )
     .map_err(TorrentFileErr::AnnounceLinkInvalidUrl)?;
 
+    let info_dict = torrent_dict
+        .get(b"info".as_slice())
+        .ok_or(TorrentFileErr::NoInfo)?;
+
+    let info_hash: [u8; 20] = Sha1::digest(
+        info_dict
+            .encode()
+            .map_err(TorrentFileErr::InfoHashEncodingFailed)?,
+    )
+    .into();
+
     let info = parse_info_dict(
-        &torrent_dict
-            .get(b"info".as_slice())
-            .ok_or(TorrentFileErr::NoInfo)?
+        &info_dict
             .extract_dict()
             .map_err(|_| TorrentFileErr::InfoNotADict)?,
     )
     .map_err(TorrentFileErr::InfoParseErr)?;
 
-    Ok(Torrent { announce, info })
+    Ok(Torrent {
+        announce,
+        info,
+        info_hash,
+    })
 }
 
-fn parse_info_dict(info_dict: &BTreeMap<Vec<u8>, Bencoded>) -> Result<Info, InfoParseErr> {
+fn parse_info_dict(info_dict: &HashMap<Vec<u8>, Bencoded>) -> Result<Info, InfoParseErr> {
     let name = std::str::from_utf8(
         &info_dict
             .get(b"name".as_slice())
