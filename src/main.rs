@@ -1,7 +1,6 @@
+use crate::torrent::metadata::{Torrent, parse_torrent};
+
 mod encoding;
 mod torrent;
 
-use encoding::bencode::Bencoded;
-fn main() {
-    println!("Hello, world!");
-}
+fn main() {}

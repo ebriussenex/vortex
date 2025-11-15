@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io};
+use std::{collections::BTreeMap, io};
 
 use sha1::{Digest, Sha1};
 use url::Url;
@@ -6,7 +6,7 @@ use url::Url;
 use crate::encoding::bencode::{Bencoded, DecodeErr, decode_single};
 
 #[derive(Debug)]
-enum TorrentFileErr {
+pub enum TorrentFileErr {
     TorrentFileNotDict,
     DecodeErr(DecodeErr),
     NoAnnounce,
@@ -21,7 +21,7 @@ enum TorrentFileErr {
 }
 
 #[derive(Debug)]
-enum InfoParseErr {
+pub enum InfoParseErr {
     ContainsLengthAndFiles,
     ContainsNeitherLengthNorFiles,
     NotContainName,
@@ -40,7 +40,7 @@ enum InfoParseErr {
 }
 
 #[derive(Debug)]
-enum InfoFilesParseErr {
+pub enum InfoFilesParseErr {
     NotList,
     EntryNotDict,
     EntryNoLength,
@@ -59,12 +59,12 @@ pub struct Torrent {
     pub announce: url::Url,
     /// Info dictionary
     pub info: Info,
-    /// SHA-1 hash of bencoded info dict. Info dict been taken from initial .torrent file.
+    /// SHA-1 hash of bencoded info dict.
     pub info_hash: [u8; 20],
 }
 
 #[derive(Debug, Clone)]
-struct Info {
+pub struct Info {
     /// Number of bytes in each piece. Piece length is almost always a power
     /// of 2, most commonly 2^18 = 256K (BitTorrent prior to version 3.2 uses 2^20 = 1 M as default).
     piece_len: usize,
@@ -128,12 +128,11 @@ pub fn parse_torrent(torrent_file: &[u8]) -> Result<Torrent, TorrentFileErr> {
         .get(b"info".as_slice())
         .ok_or(TorrentFileErr::NoInfo)?;
 
-    let info_hash: [u8; 20] = Sha1::digest(
-        info_dict
-            .encode()
-            .map_err(TorrentFileErr::InfoHashEncodingFailed)?,
-    )
-    .into();
+    let info_dict_enc = info_dict
+        .encode()
+        .map_err(TorrentFileErr::InfoHashEncodingFailed)?;
+
+    let info_hash: [u8; 20] = Sha1::digest(info_dict_enc).into();
 
     let info = parse_info_dict(
         &info_dict
@@ -149,7 +148,7 @@ pub fn parse_torrent(torrent_file: &[u8]) -> Result<Torrent, TorrentFileErr> {
     })
 }
 
-fn parse_info_dict(info_dict: &HashMap<Vec<u8>, Bencoded>) -> Result<Info, InfoParseErr> {
+fn parse_info_dict(info_dict: &BTreeMap<Vec<u8>, Bencoded>) -> Result<Info, InfoParseErr> {
     let name = std::str::from_utf8(
         &info_dict
             .get(b"name".as_slice())
@@ -253,6 +252,29 @@ fn parse_multifile_info(files_list: Vec<Bencoded>) -> Result<Vec<FilesEntry>, In
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn info_hash() {
+        let multifile_torrent = include_bytes!("./testdata/test_multi.torrent");
+        let torrent = parse_torrent(multifile_torrent).expect("failed to parse");
+        let exp_hash =
+            hex::decode("d0249be046af5cddeab1a6475d2e12b3261cf958").expect("it is valid hex");
+        let act_hash = torrent.info_hash;
+        let fmt_hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        };
+
+        assert_eq!(
+            torrent.info_hash.as_slice(),
+            exp_hash.as_slice(),
+            "\nexpected: {},\nactual: {}",
+            fmt_hex(exp_hash.as_slice()),
+            fmt_hex(act_hash.as_slice()),
+        );
+    }
 
     #[test]
     fn simple_multifile_torrent() {

@@ -1,6 +1,4 @@
-use std::{collections::HashMap, io};
-
-use anyhow::{Context, Error};
+use std::{collections::BTreeMap, io};
 
 #[derive(Debug, PartialEq)]
 pub enum DecodeErr {
@@ -32,11 +30,11 @@ pub enum Bencoded {
     Integer(i64),
     ByteStr(Vec<u8>),
     List(Vec<Bencoded>),
-    Dict(HashMap<Vec<u8>, Bencoded>),
+    Dict(BTreeMap<Vec<u8>, Bencoded>),
 }
 
 impl Bencoded {
-    pub fn extract_dict(&self) -> Result<HashMap<Vec<u8>, Bencoded>, DecodeErr> {
+    pub fn extract_dict(&self) -> Result<BTreeMap<Vec<u8>, Bencoded>, DecodeErr> {
         match self {
             Bencoded::Dict(dict) => Ok(dict.clone()),
             _ => Err(DecodeErr::IsNotDict),
@@ -97,7 +95,7 @@ fn encode_bytestr(bstr: &[u8]) -> Result<Vec<u8>, io::Error> {
     Ok(buf)
 }
 
-fn encode_dict(dict: &HashMap<Vec<u8>, Bencoded>) -> Result<Vec<u8>, io::Error> {
+fn encode_dict(dict: &BTreeMap<Vec<u8>, Bencoded>) -> Result<Vec<u8>, io::Error> {
     let mut buf = Vec::new();
 
     buf.push(b'd');
@@ -142,8 +140,8 @@ fn parse_bencode(input: &[u8]) -> ParseResult<'_, Bencoded> {
     }
 }
 
-fn parse_dict(input: &[u8]) -> ParseResult<'_, HashMap<Vec<u8>, Bencoded>> {
-    let mut res: HashMap<Vec<u8>, Bencoded> = HashMap::new();
+fn parse_dict(input: &[u8]) -> ParseResult<'_, BTreeMap<Vec<u8>, Bencoded>> {
+    let mut res = BTreeMap::new();
     let mut rest = &input[1..];
 
     while !rest.starts_with(b"e") {
@@ -391,7 +389,7 @@ mod tests {
     fn list_complex_nested_structure() {
         let input = b"li42el5:inneri100eed3:key5:valueee";
         let (val, rest) = parse_list(input).unwrap();
-        let mut dict = std::collections::HashMap::new();
+        let mut dict = std::collections::BTreeMap::new();
         dict.insert(b"key".to_vec(), Bencoded::ByteStr(b"value".to_vec()));
         let expected = vec![
             Bencoded::Integer(42),
