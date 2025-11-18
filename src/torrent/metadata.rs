@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, io};
+use std::{collections::BTreeMap, fmt::Display, io};
 
 use sha1::{Digest, Sha1};
 use url::Url;
@@ -17,7 +17,6 @@ pub enum TorrentFileErr {
     AnnounceLinkInvalidUrl(url::ParseError),
     InfoParseErr(InfoParseErr),
     InfoHashEncodingFailed(io::Error),
-    InfoHashHashingFailed(),
 }
 
 #[derive(Debug)]
@@ -66,7 +65,7 @@ pub struct Torrent {
 #[derive(Debug, Clone)]
 pub struct Info {
     /// Number of bytes in each piece. Piece length is almost always a power
-    /// of 2, most commonly 2^18 = 256K (BitTorrent prior to version 3.2 uses 2^20 = 1 M as default).
+    /// of 2, most commonly 2^18 = 256Kb (BitTorrent prior to version 3.2 uses 2^20 = 1 Mb as default).
     piece_len: usize,
     /// Concatenated SHA-1 hashed of each peace.
     /// Fixed-size pieces which are all the same length except for
@@ -124,6 +123,9 @@ pub fn parse_torrent(torrent_file: &[u8]) -> Result<Torrent, TorrentFileErr> {
     )
     .map_err(TorrentFileErr::AnnounceLinkInvalidUrl)?;
 
+    // TODO: here we decode info_dict back to get info_hash, but
+    // we actually should get bytes of encoded from torrent file actual bytes
+    // which is not yet supported by decoder
     let info_dict = torrent_dict
         .get(b"info".as_slice())
         .ok_or(TorrentFileErr::NoInfo)?;
@@ -247,6 +249,37 @@ fn parse_multifile_info(files_list: Vec<Bencoded>) -> Result<Vec<FilesEntry>, In
                 })
         })
         .collect()
+}
+
+impl Display for Torrent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Announce: {}", self.announce)?;
+        match &self.info.info_mode {
+            InfoMode::SingleFile(single_file_info) => {
+                writeln!(f, "Length: {} bytes", single_file_info.length)?;
+                writeln!(f, "Path: {}", single_file_info.name)?;
+            }
+            InfoMode::MultipleFiles(multiple_files_info) => {
+                writeln!(f, "Dir: {}", multiple_files_info.name)?;
+                writeln!(f, "Files:")?;
+                multiple_files_info
+                    .files
+                    .iter()
+                    .try_for_each(|files_entry| {
+                        writeln!(f, "\tLength: {} bytes", files_entry.length)?;
+                        writeln!(f, "\tPath: {}", files_entry.path.join("/"))
+                    })?;
+            }
+        }
+        writeln!(f, "Piece length: {}", self.info.piece_len)?;
+        writeln!(f, "Piece hashes:")?;
+        self.info
+            .pieces
+            .iter()
+            .try_for_each(|piece_hash| writeln!(f, "\t{}", hex::encode(piece_hash)))?;
+
+        writeln!(f, "Info hash: {}", hex::encode(self.info_hash))
+    }
 }
 
 #[cfg(test)]
