@@ -124,6 +124,16 @@ fn encode_list(items: &Vec<Bencoded>) -> Result<Vec<u8>, io::Error> {
 pub fn decode_single(input: &[u8]) -> Result<Bencoded, DecodeErr> {
     let (val, rest) = parse_bencode(input)?;
     if !rest.is_empty() {
+        eprintln!("decode_single: trailing data detected: {:?}", rest);
+        eprintln!(
+            "decode_single: input length: {}, consumed: {}",
+            input.len(),
+            input.len() - rest.len()
+        );
+        eprintln!(
+            "decode_single: rest as UTF-8 (lossy): {:?}",
+            std::str::from_utf8(rest)
+        );
         return Err(DecodeErr::TrailingData);
     }
     Ok(val)
@@ -323,6 +333,14 @@ mod tests {
             .for_each(|input| assert_eq!(parse_int(input), Err(DecodeErr::InvalidInt)));
     }
 
+    #[test]
+    fn int_with_trailing() {
+        let input = b"i32eextra";
+        let (parsed, rest) = parse_int(input).unwrap();
+        assert_eq!(parsed, 32);
+        assert_eq!(rest, b"extra");
+    }
+
     // list
     #[test]
     fn empty_list() {
@@ -398,6 +416,20 @@ mod tests {
                 Bencoded::Integer(100),
             ]),
             Bencoded::Dict(dict),
+        ];
+        assert_eq!(val, expected);
+        assert_eq!(rest, b"");
+    }
+
+    #[test]
+    fn list_with_inner_lists() {
+        let input = b"ll23:http://bt3.t-ru.org/annel31:http://retracker.local/announceee";
+        let (val, rest) = parse_list(input).unwrap();
+        let expected = vec![
+            Bencoded::List(vec![Bencoded::ByteStr(b"http://bt3.t-ru.org/ann".to_vec())]),
+            Bencoded::List(vec![Bencoded::ByteStr(
+                b"http://retracker.local/announce".to_vec(),
+            )]),
         ];
         assert_eq!(val, expected);
         assert_eq!(rest, b"");
@@ -501,6 +533,27 @@ mod tests {
             dict.get(b"".as_slice()),
             Some(&Bencoded::ByteStr(b"value".to_vec()))
         );
+        assert_eq!(rest, b"");
+    }
+
+    #[test]
+    fn dict_with_inner_lists() {
+        let input = b"d8:announce23:http://bt3.t-ru.org/ann13:announce-listll23:http://bt3.t-ru.org/annel31:http://retracker.local/announceeee";
+        let (dict, rest) = parse_dict(input).unwrap();
+        assert_eq!(
+            dict.get(b"announce".as_slice()),
+            Some(&Bencoded::ByteStr(b"http://bt3.t-ru.org/ann".to_vec()))
+        );
+        assert_eq!(
+            dict.get(b"announce-list".as_slice()),
+            Some(&Bencoded::List(vec![
+                Bencoded::List(vec![Bencoded::ByteStr(b"http://bt3.t-ru.org/ann".to_vec())]),
+                Bencoded::List(vec![Bencoded::ByteStr(
+                    b"http://retracker.local/announce".to_vec()
+                )]),
+            ])),
+        );
+
         assert_eq!(rest, b"");
     }
 

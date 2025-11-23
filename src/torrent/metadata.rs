@@ -15,6 +15,11 @@ pub enum TorrentFileErr {
     NoInfo,
     AnnounceValContainsNonUTF8,
     AnnounceLinkInvalidUrl(url::ParseError),
+    AnnounceListIsNotList,
+    AnnounceListTierIsNotList,
+    AnnounceListEntryNotByteStr,
+    AnnounceListContainsNonUTF8,
+    AnnounceListContainsInvalidUrl(url::ParseError),
     InfoParseErr(InfoParseErr),
     InfoHashEncodingFailed(io::Error),
 }
@@ -56,6 +61,8 @@ pub enum InfoFilesParseErr {
 pub struct Torrent {
     /// Announce url
     pub announce: url::Url,
+    /// Announce list (BEP-12)
+    pub announce_list: Option<Vec<Vec<url::Url>>>,
     /// Info dictionary
     pub info: Info,
     /// SHA-1 hash of bencoded info dict.
@@ -76,13 +83,13 @@ pub struct Info {
 }
 
 #[derive(Debug, Clone)]
-enum InfoMode {
+pub enum InfoMode {
     SingleFile(SingleFileInfo),
     MultipleFiles(MultipleFilesInfo),
 }
 
 #[derive(Debug, Clone)]
-struct SingleFileInfo {
+pub struct SingleFileInfo {
     /// Suggested name to save file/dir as. UTF-8 encoded.
     pub name: String,
     /// Size of the file in bytes.
@@ -90,7 +97,7 @@ struct SingleFileInfo {
 }
 
 #[derive(Debug, Clone)]
-struct MultipleFilesInfo {
+pub struct MultipleFilesInfo {
     /// List of dicts with lengths and paths
     pub files: Vec<FilesEntry>,
     /// Dir name
@@ -123,9 +130,37 @@ pub fn parse_torrent(torrent_file: &[u8]) -> Result<Torrent, TorrentFileErr> {
     )
     .map_err(TorrentFileErr::AnnounceLinkInvalidUrl)?;
 
-    // TODO: here we decode info_dict back to get info_hash, but
-    // we actually should get bytes of encoded from torrent file actual bytes
-    // which is not yet supported by decoder
+    let announce_list = if let Some(announce_list) = &torrent_dict.get(b"announce-list".as_slice())
+    {
+        Some(
+            announce_list
+                .extract_list()
+                .map_err(|_| TorrentFileErr::AnnounceListIsNotList)?
+                .iter()
+                .map(|al_tier| {
+                    al_tier
+                        .extract_list()
+                        .map_err(|_| TorrentFileErr::AnnounceListTierIsNotList)?
+                        .iter()
+                        .map(|entry| {
+                            std::str::from_utf8(
+                                &entry
+                                    .extract_bytestr()
+                                    .map_err(|_| TorrentFileErr::AnnounceListEntryNotByteStr)?,
+                            )
+                            .map_err(|_| TorrentFileErr::AnnounceListContainsNonUTF8)
+                            .and_then(|s| {
+                                Url::parse(s).map_err(TorrentFileErr::AnnounceLinkInvalidUrl)
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    } else {
+        None
+    };
+
     let info_dict = torrent_dict
         .get(b"info".as_slice())
         .ok_or(TorrentFileErr::NoInfo)?;
@@ -145,6 +180,7 @@ pub fn parse_torrent(torrent_file: &[u8]) -> Result<Torrent, TorrentFileErr> {
 
     Ok(Torrent {
         announce,
+        announce_list,
         info,
         info_hash,
     })
@@ -249,6 +285,17 @@ fn parse_multifile_info(files_list: Vec<Bencoded>) -> Result<Vec<FilesEntry>, In
                 })
         })
         .collect()
+}
+
+impl Torrent {
+    pub fn total_size(&self) -> usize {
+        match &self.info.info_mode {
+            InfoMode::SingleFile(single_file_info) => single_file_info.length,
+            InfoMode::MultipleFiles(multiple_files_info) => {
+                multiple_files_info.files.iter().map(|fe| fe.length).sum()
+            }
+        }
+    }
 }
 
 impl Display for Torrent {
@@ -362,5 +409,19 @@ mod tests {
             }
             InfoMode::MultipleFiles(_) => panic!("expected singlefile"),
         }
+    }
+
+    #[test]
+    fn announce_list_torrent() {
+        let announce_list_torrent = include_bytes!("./testdata/test_announce_list.torrent");
+        let torrent = parse_torrent(announce_list_torrent).expect("failed to parse");
+        // 23:http://bt3.t-ru.org/annel31:http://retracker.local/announce
+        assert_eq!(
+            torrent.announce_list,
+            Some(vec![
+                vec![Url::parse("http://bt3.t-ru.org/ann").unwrap()],
+                vec![Url::parse("http://retracker.local/announce").unwrap()],
+            ])
+        )
     }
 }
