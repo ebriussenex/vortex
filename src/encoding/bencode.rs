@@ -1,6 +1,9 @@
 use std::{collections::BTreeMap, io};
 
-#[derive(Debug, PartialEq)]
+use thiserror::Error;
+
+#[derive(Debug, PartialEq, Error)]
+#[error("{:?}", self)]
 pub enum DecodeErr {
     StrNotContainColon,
     TrailingData,
