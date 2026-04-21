@@ -294,7 +294,7 @@ pub enum SessionError {
     #[error("failed to parse tracker response: {0}")]
     Parse(String),
 
-    #[error("")]
+    #[error("failed to request peers")]
     RequestPeers(#[from] PeersResponseParseErr),
 }
 #[derive(Debug, Error)]
