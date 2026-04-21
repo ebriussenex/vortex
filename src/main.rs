@@ -15,9 +15,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     //print!("{}\n", storrent_file);
 
-    let real_torrent_file =
-        parse_torrent(include_bytes!("../testdata/test_dir_of.torrent")).unwrap();
-
+    //let real_torrent_file =
+    //parse_torrent(include_bytes!("../testdata/test_dir_of.torrent")).unwrap();
+    let real_torrent_file = parse_torrent(include_bytes!(
+        "../../vortex-test/work/torrent/single.torrent"
+    ))
+    .unwrap();
     println!("{}", real_torrent_file);
 
     eprintln!("calling {}", real_torrent_file.announce);
@@ -28,6 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         6881,
         Some(80),
     );
+
+    ts.start_session().await?;
     let peers = ts.request_peers_body().await.unwrap();
     let hexe_peers = hex::encode(peers);
     eprintln!("hx: {hexe_peers}");

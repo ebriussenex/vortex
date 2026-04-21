@@ -1,14 +1,15 @@
-use std::net::{Ipv4Addr, SocketAddr};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    str::Utf8Error,
+};
 
-use anyhow::{Context, bail};
-
-use percent_encoding::NON_ALPHANUMERIC;
 use rand::distr::{Alphanumeric, SampleString};
 
 use crate::{
-    encoding::bencode::{Bencoded, decode_single},
+    encoding::bencode::{self, Bencoded, decode_single},
     torrent::{announce::Announce, metadata::Torrent},
 };
+use thiserror::Error;
 
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -58,9 +59,55 @@ pub struct TrackerGetRequest {
     event: Option<String>,
 }
 
+#[derive(Debug, Error)]
+pub enum PeersResponseParseErr {
+    #[error("decoding response error")]
+    Decoding(#[source] bencode::DecodeErr),
+    #[error("response should contain interval")]
+    NoInterval,
+    #[error("interval must be positive")]
+    NonPosInterval,
+    #[error("interval must be integer")]
+    NonIntInterval,
+    #[error("min interval must be positive")]
+    NonPosMinInterval,
+    #[error("min interval must be integer")]
+    NonIntMinInterval,
+    #[error("should contain peers")]
+    NoPeers,
+    #[error("failed to parse peers")]
+    PeersParseErr(#[source] PeersParseErr),
+}
+
+#[derive(Debug, Error)]
+pub enum PeersParseErr {
+    #[error("must be bencoded dict")]
+    NotDict,
+    #[error("missing peer id key")]
+    NoPeerId,
+    #[error("peer id not bytestr")]
+    NotBytestr,
+    #[error("peer id must be 20 bytes")]
+    InvalidSize,
+    #[error("missing ip key")]
+    NoIPKey,
+    #[error("ip must be bytestr")]
+    NotBytestrIp,
+    #[error("missing port")]
+    NoPort,
+    #[error("port must be int")]
+    PortNotInt,
+    #[error("port is out of range of u16")]
+    PortOverflow,
+    #[error("must be list or bytestr(compact)")]
+    NotBytestrOrList,
+    #[error("ip invalid utf-8")]
+    IpInvalidUTF8(#[source] Utf8Error),
+}
+
 /// Tracker response is bencoded dict.
 #[derive(Debug, Clone)]
-pub struct TrackerResponse {
+pub struct PeersResponse {
     /// Number of **seconds** the downloader should wait between regular rerequests
     pub interval: usize,
     /// Client should not announce more frequently then this
@@ -84,101 +131,89 @@ pub enum SocketOrDomain {
     Domain(String),
 }
 
-impl TrackerResponse {
-    fn parse(response: &[u8]) -> anyhow::Result<Self> {
+impl PeersResponse {
+    fn parse(response: &[u8]) -> Result<Self, PeersResponseParseErr> {
         let response_dict = decode_single(response)
-            .context("decode response error")?
+            .map_err(PeersResponseParseErr::Decoding)?
             .extract_dict()
-            .context("content not bencoded dict")?;
+            .map_err(PeersResponseParseErr::Decoding)?;
 
         let interval = response_dict
             .get(b"interval".as_slice())
-            .context("should contain interval")?
+            .ok_or(PeersResponseParseErr::NoInterval)?
             .extract_int()
-            .context("interval must be int type")?
+            .map_err(|_| PeersResponseParseErr::NonIntInterval)?
             .try_into()
-            .context("interval must be positive")?;
+            .map_err(|_| PeersResponseParseErr::NonPosInterval)?;
 
         let min_interval = response_dict
             .get(b"min interval".as_slice())
             .map(|v| {
                 v.extract_int()
-                    .context("min interval must be int")?
+                    .map_err(|_| PeersResponseParseErr::NonIntMinInterval)?
                     .try_into()
-                    .context("min interval must be positive")
+                    .map_err(|_| PeersResponseParseErr::NonPosMinInterval)
             })
             .transpose()?;
 
         let peers_bytes = response_dict
             .get(b"peers".as_slice())
-            .context("should contain peers")?;
+            .ok_or(PeersResponseParseErr::NoPeers)?;
 
-        let peers = Self::parse_peers(peers_bytes)?;
-        Ok(TrackerResponse {
+        let peers = Self::parse_peers(peers_bytes).map_err(PeersResponseParseErr::PeersParseErr)?;
+
+        Ok(PeersResponse {
             min_interval,
             interval,
             peers,
         })
     }
 
-    fn parse_peers(peers_bytes: &Bencoded) -> anyhow::Result<Vec<Peer>> {
+    fn parse_peers(peers_bytes: &Bencoded) -> Result<Vec<Peer>, PeersParseErr> {
         match peers_bytes {
-            Bencoded::ByteStr(pb) => {
-                if pb.len() % 6 != 0 {
-                    bail!("unexpected peers len {}", pb.len());
-                }
-                pb.chunks_exact(6)
-                    .map(|chunk| {
-                        let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
-                        let port = u16::from_be_bytes([chunk[4], chunk[5]]);
-                        Ok(Peer::Compact(ip, port))
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            }
-
+            Bencoded::ByteStr(pb) => pb
+                .chunks_exact(6)
+                .map(|chunk| {
+                    let ip = Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]);
+                    let port = u16::from_be_bytes([chunk[4], chunk[5]]);
+                    Ok(Peer::Compact(ip, port))
+                })
+                .collect::<Result<Vec<_>, _>>(),
             Bencoded::List(peers_list) => peers_list
                 .iter()
                 .map(|peer| {
-                    let peer_dict = peer.extract_dict().context("peer in list should be dict")?;
-
+                    let peer_dict = peer.extract_dict().map_err(|_| PeersParseErr::NotDict)?;
                     let peer_id = peer_dict
                         .get(b"peer id".as_slice())
-                        .context("peer missing peer id key")?
+                        .ok_or(PeersParseErr::NoPeerId)?
                         .extract_bytestr()
-                        .context("peer id must be bytestring")?;
-
-                    anyhow::ensure!(peer_id.len() == 20, "peer id is not 20 bytes long");
-
-                    let peer_id: [u8; 20] = peer_id
-                        .try_into()
-                        .map_err(|_| anyhow::anyhow!("(err) peer id must be exactly 20 bytes"))?;
-
-                    let ip = &peer_dict
+                        .map_err(|_| PeersParseErr::NotBytestr)?;
+                    if peer_id.len() != 20 {
+                        return Err(PeersParseErr::InvalidSize);
+                    }
+                    let peer_id: [u8; 20] =
+                        peer_id.try_into().map_err(|_| PeersParseErr::InvalidSize)?;
+                    let ip = peer_dict
                         .get(b"ip".as_slice())
-                        .context("peer missing ip key")?
+                        .ok_or(PeersParseErr::NoIPKey)?
                         .extract_bytestr()
-                        .context("ip must be bytestring")?;
-
-                    let ip = std::str::from_utf8(ip).context("ip invalid utf-8")?;
-
+                        .map_err(|_| PeersParseErr::NotBytestrIp)?;
+                    let ip = std::str::from_utf8(&ip).map_err(PeersParseErr::IpInvalidUTF8)?;
                     let port_i64 = peer_dict
                         .get(b"port".as_slice())
-                        .context("peer missing port")?
+                        .ok_or(PeersParseErr::NoPort)?
                         .extract_int()
-                        .context("port must be int")?;
+                        .map_err(|_| PeersParseErr::PortNotInt)?;
 
-                    let port = u16::try_from(port_i64)
-                        .with_context(|| format!("port is out of range for u16: {}", port_i64))?;
-
+                    let port = u16::try_from(port_i64).map_err(|_| PeersParseErr::PortOverflow)?;
                     let socket_or_domain = match format!("{}:{}", ip, port).parse::<SocketAddr>() {
                         Ok(socket) => SocketOrDomain::Socket(socket),
                         Err(_) => SocketOrDomain::Domain(ip.to_string()),
                     };
-
                     Ok(Peer::NonCompact(peer_id, socket_or_domain))
                 })
                 .collect::<Result<Vec<_>, _>>(),
-            _ => bail!("peers should be bytestr (compact) or list"),
+            _ => Err(PeersParseErr::NotBytestrOrList),
         }
     }
 }
@@ -210,7 +245,7 @@ pub struct TorrentSession {
     announce: Announce,
 }
 
-struct GetQueryParams<'a> {
+struct TrackerQueryParams<'a> {
     info_hash: &'a [u8],
     peer_id: &'a [u8; 20],
     port: u16,
@@ -223,13 +258,9 @@ struct GetQueryParams<'a> {
     ip: Option<&'a str>,
 }
 
-impl GetQueryParams<'_> {
+impl TrackerQueryParams<'_> {
     fn apply_to(&self, mut url: url::Url) -> url::Url {
         url.query_pairs_mut()
-            .append_pair(
-                "info_hash",
-                &percent_encoding::percent_encode(self.info_hash, NON_ALPHANUMERIC).to_string(),
-            )
             .append_pair("peer_id", str::from_utf8(self.peer_id).unwrap())
             .append_pair("port", &self.port.to_string())
             .append_pair("uploaded", &self.uploaded.to_string())
@@ -243,8 +274,39 @@ impl GetQueryParams<'_> {
         if let Some(ip) = self.ip {
             url.query_pairs_mut().append_pair("ip", ip);
         }
+
+        let encoded_hash: String = self
+            .info_hash
+            .iter()
+            .map(|&b| format!("%{:02X}", b))
+            .collect();
+        let query = format!("{}&info_hash={}", url.query().unwrap_or(""), encoded_hash);
+        url.set_query(Some(&query));
         url
     }
+}
+
+#[derive(Debug, Error)]
+pub enum SessionError {
+    #[error(transparent)]
+    Tracker(#[from] TrackerError),
+
+    #[error("failed to parse tracker response: {0}")]
+    Parse(String),
+
+    #[error("")]
+    RequestPeers(#[from] PeersResponseParseErr),
+}
+#[derive(Debug, Error)]
+pub enum TrackerError {
+    #[error("no trackers available")]
+    NoTrackersAvailable,
+
+    #[error("all trackers failed")]
+    AllFailed(#[source] reqwest::Error),
+
+    #[error("failed to read response body")]
+    BodyRead(#[source] reqwest::Error),
 }
 
 impl TorrentSession {
@@ -280,8 +342,8 @@ impl TorrentSession {
         }
     }
 
-    pub async fn request_peers_body(&mut self) -> anyhow::Result<Vec<u8>> {
-        let params = GetQueryParams {
+    pub async fn request_peers_body(&mut self) -> Result<Vec<u8>, TrackerError> {
+        let params = TrackerQueryParams {
             info_hash: &self.info_hash,
             peer_id: &self.peer_id,
             port: self.port,
@@ -293,26 +355,49 @@ impl TorrentSession {
             event: self.event.as_deref(),
             ip: self.ip.as_deref(),
         };
+
         let client = &self.client;
         let mut src = self.announce.session();
-        let mut last_err = anyhow::anyhow!("no trackers available");
+        let mut last_err: Option<reqwest::Error> = None;
 
         while let Some(tracker_url) = src.next() {
             let request_url = params.apply_to(tracker_url.clone());
             match client.get(request_url).send().await {
                 Ok(resp) => {
-                    let bytes = resp.bytes().await?.to_vec();
+                    let bytes = resp.bytes().await.map_err(TrackerError::BodyRead)?.to_vec();
                     src.on_success();
                     return Ok(bytes);
                 }
                 Err(e) => {
                     eprintln!("tracker {tracker_url} failed: {e}");
-                    last_err = e.into();
+                    last_err = Some(e);
                 }
             }
         }
 
-        Err(last_err)
+        Err(match last_err {
+            Some(e) => TrackerError::AllFailed(e),
+            None => TrackerError::NoTrackersAvailable,
+        })
+    }
+
+    pub async fn start_session(&mut self) -> Result<(), SessionError> {
+        let peers_body = self
+            .request_peers_body()
+            .await
+            .map_err(SessionError::Tracker)?;
+
+        let peers = PeersResponse::parse(&peers_body).map_err(SessionError::RequestPeers)?;
+
+        println!("successfully got peers!");
+        println!(
+            "interval: {}, min_interval: {}, peers: {:?}",
+            peers.interval,
+            peers.min_interval.unwrap_or(0),
+            peers.peers
+        );
+
+        Ok(())
     }
 }
 
@@ -331,7 +416,7 @@ mod tests {
         let expected_ip = Ipv4Addr::from_str("46.22.55.232").unwrap();
         let expected_port = 51413;
 
-        let res = TrackerResponse::parse(&response).unwrap();
+        let res = PeersResponse::parse(&response).unwrap();
 
         assert_eq!(res.interval, 1962);
         assert_eq!(res.peers, vec![Peer::Compact(expected_ip, expected_port)]);
@@ -346,7 +431,7 @@ mod tests {
         let expected_ip = Ipv4Addr::from_str("46.22.55.232").unwrap();
         let expected_port = 5141;
 
-        let res = TrackerResponse::parse(response_bytes).unwrap();
+        let res = PeersResponse::parse(response_bytes).unwrap();
 
         assert_eq!(res.interval, 1800);
         assert_eq!(res.peers.len(), 1);

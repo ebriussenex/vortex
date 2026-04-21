@@ -111,7 +111,7 @@ fn encode_dict(dict: &BTreeMap<Vec<u8>, Bencoded>) -> Result<Vec<u8>, io::Error>
     Ok(buf)
 }
 
-fn encode_list(items: &Vec<Bencoded>) -> Result<Vec<u8>, io::Error> {
+fn encode_list(items: &[Bencoded]) -> Result<Vec<u8>, io::Error> {
     let mut buf = Vec::new();
 
     buf.push(b'l');
