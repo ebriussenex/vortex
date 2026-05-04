@@ -1,9 +1,15 @@
-use rand::distr::{Alphanumeric, SampleString};
+use std::collections::HashMap;
 
+use rand::distr::{Alphanumeric, SampleString};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::task::JoinSet;
+
+use crate::torrent::peer::*;
 use crate::torrent::{
     announce::Announce,
     metadata::Torrent,
-    peer::{self, PeersResponse},
+    peer::{self, Handshake, PeersResponse},
 };
 use thiserror::Error;
 
@@ -80,18 +86,28 @@ pub enum SessionError {
     #[error(transparent)]
     Tracker(#[from] TrackerError),
 
-    #[error("failed to request peers")]
-    RequestPeers(#[from] peer::PeersResponseParseErr),
+    #[error("failed to request peers: {0}")]
+    RequestPeers(#[source] peer::PeersResponseParseErr),
+
+    #[error("peer connection error: {0}")]
+    PeerConnErr(PeerConnErr),
+
+    #[error("failed to write handshake: {0}")]
+    HandshakeWrite(#[source] std::io::Error),
+
+    #[error("failed to read handshake: {0}")]
+    HandshakeRead(#[source] std::io::Error),
 }
+
 #[derive(Debug, Error)]
 pub enum TrackerError {
     #[error("no trackers available")]
     NoTrackersAvailable,
 
-    #[error("all trackers failed")]
+    #[error("all trackers failed: {0}")]
     AllFailed(#[source] reqwest::Error),
 
-    #[error("failed to read response body")]
+    #[error("failed to read response body: {0}")]
     BodyRead(#[source] reqwest::Error),
 }
 
@@ -173,15 +189,62 @@ impl TorrentSession {
             .await
             .map_err(SessionError::Tracker)?;
 
-        let peers = PeersResponse::parse(&peers_body).map_err(SessionError::RequestPeers)?;
+        let peers_resp = PeersResponse::parse(&peers_body).map_err(SessionError::RequestPeers)?;
 
-        println!("successfully got peers!");
-        println!(
+        eprintln!("successfully got peers!");
+        eprintln!(
             "interval: {}, min_interval: {}, peers: {:?}",
-            peers.interval,
-            peers.min_interval.unwrap_or(0),
-            peers.peers
+            peers_resp.interval,
+            peers_resp.min_interval.unwrap_or(0),
+            peers_resp.peers
         );
+
+        let handshake = Handshake::new(&self.peer_id, &self.info_hash);
+
+        eprintln!("starting handshake");
+
+        let mut join_set = JoinSet::new();
+
+        peers_resp.peers.into_iter().for_each(|peer| {
+            join_set.spawn(async move {
+                let mut stream = peer
+                    .resolve()
+                    .connect()
+                    .await
+                    .map_err(SessionError::PeerConnErr)?;
+
+                stream
+                    .write_all(bytemuck::bytes_of(&handshake))
+                    .await
+                    .map_err(SessionError::HandshakeWrite)?;
+
+                let mut resp_bytes = [0u8; 68];
+                stream
+                    .read_exact(&mut resp_bytes)
+                    .await
+                    .map_err(SessionError::HandshakeRead)?;
+
+                let resp_handshake = bytemuck::from_bytes::<Handshake>(&resp_bytes);
+                eprintln!(
+                    "successfull handshake with peer {:#?}:\nhs: {:?}",
+                    peer, resp_handshake
+                );
+
+                Ok::<_, SessionError>((peer, stream))
+            });
+        });
+
+        let mut peer_streams: HashMap<Peer, TcpStream> = HashMap::new();
+
+        while let Some(join_result) = join_set.join_next().await {
+            match join_result {
+                Err(e) => eprintln!("panic during handshake: {e}"),
+                Ok(Ok((peer, stream))) => {
+                    peer_streams.insert(peer, stream);
+                }
+                Ok(Err(e)) => eprintln!("error with handshake: {e}"),
+            }
+        }
 
         Ok(())
     }

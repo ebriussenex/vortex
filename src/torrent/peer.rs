@@ -4,11 +4,13 @@ use std::{
 };
 
 use crate::encoding::bencode::{self, Bencoded, decode_single};
+use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
+use tokio::net::TcpStream;
 
 #[derive(Debug, Error)]
 pub(crate) enum PeersResponseParseErr {
-    #[error("decoding response error")]
+    #[error("decoding response error: {0}")]
     Decoding(#[source] bencode::DecodeErr),
     #[error("response should contain interval")]
     NoInterval,
@@ -22,7 +24,7 @@ pub(crate) enum PeersResponseParseErr {
     NonIntMinInterval,
     #[error("should contain peers")]
     NoPeers,
-    #[error("failed to parse peers")]
+    #[error("failed to parse peers: {0}")]
     PeersParseErr(#[source] PeersParseErr),
 }
 
@@ -48,22 +50,34 @@ pub(crate) enum PeersParseErr {
     PortOverflow,
     #[error("must be list or bytestr(compact)")]
     NotBytestrOrList,
-    #[error("ip invalid utf-8")]
+    #[error("ip invalid utf-8: {0}")]
     IpInvalidUTF8(#[source] Utf8Error),
 }
 
 type PeerId = [u8; 20];
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) enum Peer {
     Compact(Ipv4Addr, u16),
     NonCompact(PeerId, SocketOrDomain),
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub(crate) enum SocketOrDomain {
     Socket(SocketAddr),
     Domain(String),
+}
+
+/// Resolved to be used in tcp connection
+pub(crate) enum ResolvedPeer {
+    Socket(SocketAddr),
+    Domain(String),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum PeerConnErr {
+    #[error("failed to establish tcp connection for peer: {0}")]
+    TcpConnFailed(#[source] std::io::Error),
 }
 
 /// Tracker response is bencoded dict.
@@ -163,6 +177,55 @@ impl PeersResponse {
                 })
                 .collect::<Result<Vec<_>, _>>(),
             _ => Err(PeersParseErr::NotBytestrOrList),
+        }
+    }
+}
+
+impl Peer {
+    pub(crate) fn resolve(&self) -> ResolvedPeer {
+        match self {
+            Peer::Compact(ip, port) => {
+                ResolvedPeer::Socket(SocketAddr::new(std::net::IpAddr::V4(*ip), *port))
+            }
+            Peer::NonCompact(_, socket_or_domain) => match socket_or_domain {
+                SocketOrDomain::Socket(socket_addr) => ResolvedPeer::Socket(*socket_addr),
+                SocketOrDomain::Domain(domain) => ResolvedPeer::Domain(domain.clone()),
+            },
+        }
+    }
+}
+
+impl ResolvedPeer {
+    pub(crate) async fn connect(self) -> Result<TcpStream, PeerConnErr> {
+        match self {
+            ResolvedPeer::Socket(addr) => TcpStream::connect(addr).await,
+            ResolvedPeer::Domain(domain) => TcpStream::connect(domain).await,
+        }
+        .map_err(PeerConnErr::TcpConnFailed)
+    }
+}
+
+/// Needs to be POD, coz written to tcp socket
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Zeroable, Pod)]
+pub struct Handshake {
+    pstrlen: u8,
+    pstr: [u8; 19],
+    reserved: [u8; 8],
+    info_hash: [u8; 20],
+    // ususally the same that is transmitted in tracker request, but not always as there are
+    // anonymyty options like Vuze does
+    peer_id: [u8; 20],
+}
+
+impl Handshake {
+    pub(crate) fn new(peer_id: &[u8; 20], info_hash: &[u8; 20]) -> Self {
+        Self {
+            pstrlen: 19,
+            pstr: *b"BitTorrent protocol",
+            reserved: [0; 8],
+            info_hash: *info_hash,
+            peer_id: *peer_id,
         }
     }
 }

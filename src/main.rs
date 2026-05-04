@@ -33,9 +33,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     ts.start_session().await?;
-    let peers = ts.request_peers_body().await.unwrap();
-    let hexe_peers = hex::encode(peers);
-    eprintln!("hx: {hexe_peers}");
 
     // println!("{}", real_torrent_file);
 
