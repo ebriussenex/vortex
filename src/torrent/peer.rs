@@ -3,7 +3,7 @@ use std::{
     str::Utf8Error,
 };
 
-use crate::encoding::bencode::{self, Bencoded, decode_single};
+use crate::encoding::bencode::{self, Bencoded, DecodeErr, decode_single};
 use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 #[derive(Debug, Error)]
 pub(crate) enum PeersResponseParseErr {
     #[error("decoding response error: {0}")]
-    Decoding(#[source] bencode::DecodeErr),
+    Decoding(#[source] DecodeErr),
     #[error("response should contain interval")]
     NoInterval,
     #[error("interval must be positive")]
@@ -26,6 +26,12 @@ pub(crate) enum PeersResponseParseErr {
     NoPeers,
     #[error("failed to parse peers: {0}")]
     PeersParseErr(#[source] PeersParseErr),
+    #[error("tracker respond with failure: {0}")]
+    TrackerFailure(String),
+    #[error("failure reason must be bytestr")]
+    FailureReasonNotBytestr(DecodeErr),
+    #[error("failure reason must utf-8")]
+    FailureReasonNotValidUTF8(std::str::Utf8Error),
 }
 
 #[derive(Debug, Error)]
@@ -100,6 +106,15 @@ impl PeersResponse {
             .map_err(PeersResponseParseErr::Decoding)?
             .extract_dict()
             .map_err(PeersResponseParseErr::Decoding)?;
+
+        if let Some(reason) = response_dict.get(b"failure reason".as_slice()) {
+            let reason = reason
+                .extract_bytestr()
+                .map_err(PeersResponseParseErr::FailureReasonNotBytestr)?;
+            let reason = std::str::from_utf8(&reason)
+                .map_err(PeersResponseParseErr::FailureReasonNotValidUTF8)?;
+            return Err(PeersResponseParseErr::TrackerFailure(String::from(reason)));
+        }
 
         let interval = response_dict
             .get(b"interval".as_slice())
