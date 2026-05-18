@@ -6,7 +6,11 @@ use std::{
 use crate::encoding::bencode::{self, Bencoded, DecodeErr, decode_single};
 use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+    sync::mpsc::Receiver,
+};
 
 #[derive(Debug, Error)]
 pub(crate) enum PeersResponseParseErr {
@@ -84,6 +88,10 @@ pub(crate) enum ResolvedPeer {
 pub(crate) enum PeerConnErr {
     #[error("failed to establish tcp connection for peer: {0}")]
     TcpConnFailed(#[source] std::io::Error),
+    #[error("failed to write handshake: {0}")]
+    HandshakeWrite(#[source] std::io::Error),
+    #[error("failed to read handshake: {0}")]
+    HandshakeRead(#[source] std::io::Error),
 }
 
 /// Tracker response is bencoded dict.
@@ -197,7 +205,7 @@ impl PeersResponse {
 }
 
 impl Peer {
-    pub(crate) fn resolve(&self) -> ResolvedPeer {
+    fn resolve(&self) -> ResolvedPeer {
         match self {
             Peer::Compact(ip, port) => {
                 ResolvedPeer::Socket(SocketAddr::new(std::net::IpAddr::V4(*ip), *port))
@@ -208,10 +216,28 @@ impl Peer {
             },
         }
     }
+
+    pub(crate) async fn connect(&self, handshake: &Handshake) -> Result<TcpStream, PeerConnErr> {
+        let mut stream = self.resolve().connect().await?;
+        stream
+            .write_all(bytemuck::bytes_of(handshake))
+            .await
+            .map_err(PeerConnErr::HandshakeWrite)?;
+
+        let mut resp_bytes = [0u8; 68];
+        stream
+            .read_exact(&mut resp_bytes)
+            .await
+            .map_err(PeerConnErr::HandshakeRead)?;
+
+        // TODO: later needed for extensions (BEP 5, BEP 10, etc)
+        let _ = bytemuck::from_bytes::<Handshake>(&resp_bytes);
+        Ok(stream)
+    }
 }
 
 impl ResolvedPeer {
-    pub(crate) async fn connect(self) -> Result<TcpStream, PeerConnErr> {
+    async fn connect(self) -> Result<TcpStream, PeerConnErr> {
         match self {
             ResolvedPeer::Socket(addr) => TcpStream::connect(addr).await,
             ResolvedPeer::Domain(domain) => TcpStream::connect(domain).await,
@@ -234,7 +260,7 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    pub(crate) fn new(peer_id: &[u8; 20], info_hash: &[u8; 20]) -> Self {
+    pub fn new(peer_id: &[u8; 20], info_hash: &[u8; 20]) -> Self {
         Self {
             pstrlen: 19,
             pstr: *b"BitTorrent protocol",

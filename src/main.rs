@@ -2,9 +2,11 @@ use crate::torrent::{metadata::parse_torrent, session::TorrentSession};
 
 mod encoding;
 mod torrent;
+mod utils;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let files_dir = ("./torrent/testdata/");
     let mtorrent_file =
         parse_torrent(include_bytes!("./torrent/testdata/test_multi.torrent")).unwrap();
     let storrent_file =
@@ -32,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(80),
     );
 
-    ts.start_session().await?;
+    // ts.start_session().await?;
 
     // println!("{}", real_torrent_file);
 
