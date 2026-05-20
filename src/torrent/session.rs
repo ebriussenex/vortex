@@ -13,6 +13,7 @@ use tokio_util::codec::Framed;
 
 use crate::torrent::codec::{BittorrentCodec, Message};
 use crate::torrent::peer::*;
+use crate::torrent::piece::PieceManager;
 use crate::torrent::{
     announce::Announce,
     metadata::Torrent,
@@ -284,6 +285,7 @@ async fn peer_task(
     let mut keepalive = interval(Duration::from_secs(120));
     let mut state = PeerState::new();
 
+    // TODO: NOT CANCELATION SAFE FIX IT
     loop {
         tokio::select! {
             result = framed.next() => match result {

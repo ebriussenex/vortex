@@ -10,7 +10,7 @@ pub enum Message {
     Interested,
     NotInterested,
     Have(u32),
-    BitField(Vec<u8>),
+    BitField(BytesMut),
     Request {
         index: u32,
         begin: u32,
@@ -19,7 +19,7 @@ pub enum Message {
     Piece {
         index: u32,
         begin: u32,
-        data: Vec<u8>,
+        data: BytesMut,
     },
     Cancel {
         index: u32,
@@ -44,53 +44,89 @@ impl Decoder for BittorrentCodec {
             return Ok(None);
         }
 
-        let mut length_bytes = [0u8; 4];
-        length_bytes.copy_from_slice(&src[..4]);
-        let length = u32::from_be_bytes(length_bytes) as usize;
+        let mut len_bytes = [0u8; 4];
+        len_bytes.copy_from_slice(&src[..4]);
+        let frame_len = u32::from_be_bytes(len_bytes) as usize;
 
-        if length > MAX_BLOCK_SIZE {
+        if frame_len == 0 {
+            src.advance(4);
+            return Ok(Some(Message::KeepAlive));
+        }
+        if frame_len > MAX_BLOCK_SIZE {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Frame of length {} is too large.", length),
+                format!("Frame of length {} is too large.", frame_len),
             ));
         }
-
-        if src.len() < 4 + length {
-            src.reserve(4 + length - src.len());
+        if src.len() < 4 + frame_len {
             return Ok(None);
         }
 
         src.advance(4);
+        let mut frame = src.split_to(frame_len);
 
-        if length == 0 {
-            return Ok(Some(Message::KeepAlive));
+        if !frame.has_remaining() {
+            return Err(std::io::Error::new(ErrorKind::InvalidData, "empty frame"));
         }
 
-        let data = src.split_to(length);
+        let id = frame.get_u8();
 
-        let msg = match data[0] {
+        let msg = match id {
             0 => Message::Choke,
             1 => Message::Unchoke,
             2 => Message::Interested,
             3 => Message::NotInterested,
-            4 => Message::Have(read_u32(&data, 1)?),
-            5 => Message::BitField(data[1..].to_vec()),
-            6 => Message::Request {
-                index: read_u32(&data, 1)?,
-                begin: read_u32(&data, 5)?,
-                length: read_u32(&data, 9)?,
-            },
-            7 => Message::Piece {
-                index: read_u32(&data, 1)?,
-                begin: read_u32(&data, 5)?,
-                data: data[9..].to_vec(),
-            },
-            8 => Message::Cancel {
-                index: read_u32(&data, 1)?,
-                begin: read_u32(&data, 5)?,
-                length: read_u32(&data, 9)?,
-            },
-            9 => Message::Port(read_u16(&data, 1)?),
+            4 => {
+                check_len_at_least(&frame, 4)?;
+                Message::Have(frame.get_u32())
+            }
+            5 => {
+                let bitfield = frame.copy_to_bytes(frame.remaining());
+                if bitfield.len() > MAX_BITFIELD_SIZE {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "bitfield too large",
+                    ));
+                }
+                Message::BitField(bitfield.into())
+            }
+            6 => {
+                check_len_at_least(&frame, 12)?;
+                Message::Request {
+                    index: frame.get_u32(),
+                    begin: frame.get_u32(),
+                    length: frame.get_u32(),
+                }
+            }
+            7 => {
+                check_len_at_least(&frame, 8)?;
+                let index = frame.get_u32();
+                let begin = frame.get_u32();
+                let data = frame.copy_to_bytes(frame.remaining());
+                if data.len() > MAX_BLOCK_SIZE {
+                    return Err(std::io::Error::new(
+                        ErrorKind::InvalidData,
+                        "piece data too large",
+                    ));
+                }
+                Message::Piece {
+                    index,
+                    begin,
+                    data: data.into(),
+                }
+            }
+            8 => {
+                check_len_at_least(&frame, 12)?;
+                Message::Cancel {
+                    index: frame.get_u32(),
+                    begin: frame.get_u32(),
+                    length: frame.get_u32(),
+                }
+            }
+            9 => {
+                check_len_at_least(&frame, 2)?;
+                Message::Port(frame.get_u16())
+            }
             id => {
                 return Err(std::io::Error::new(
                     ErrorKind::InvalidData,
@@ -102,18 +138,14 @@ impl Decoder for BittorrentCodec {
     }
 }
 
-fn read_u32(data: &[u8], offset: usize) -> Result<u32, std::io::Error> {
-    data.get(offset..offset + 4)
-        .and_then(|s| s.try_into().ok())
-        .map(u32::from_be_bytes)
-        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "unexpected payload"))
-}
-
-fn read_u16(data: &[u8], offset: usize) -> Result<u16, std::io::Error> {
-    data.get(offset..offset + 4)
-        .and_then(|s| s.try_into().ok())
-        .map(u16::from_be_bytes)
-        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidData, "unexpected payload"))
+fn check_len_at_least(frame: &BytesMut, n: usize) -> Result<(), std::io::Error> {
+    if frame.len() < n {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidData,
+            "not enough bytes",
+        ));
+    }
+    Ok(())
 }
 
 impl Encoder<Message> for BittorrentCodec {
@@ -270,7 +302,7 @@ mod tests {
             Message::Piece { index, begin, data } => {
                 assert_eq!(index, 1);
                 assert_eq!(begin, 16);
-                assert_eq!(data, b"hello");
+                assert_eq!(data, BytesMut::from(b"hello".as_slice()));
             }
             _ => panic!("expected Piece"),
         }
@@ -365,7 +397,7 @@ mod tests {
     #[test]
     fn test_bitfield_roundtrip() {
         let bitfield = vec![0b11001010, 0b00110101];
-        match roundtrip(Message::BitField(bitfield.clone())) {
+        match roundtrip(Message::BitField(bitfield.as_slice().into())) {
             Message::BitField(b) => assert_eq!(b, bitfield),
             _ => panic!("expected BitField"),
         }
@@ -393,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_piece_roundtrip() {
-        let data = vec![1u8; 512];
+        let data: BytesMut = vec![1u8; 512].as_slice().into();
         match roundtrip(Message::Piece {
             index: 3,
             begin: 128,
@@ -444,7 +476,7 @@ mod tests {
     fn test_piece_too_large() {
         let mut codec = BittorrentCodec {};
         let mut buf = BytesMut::new();
-        let data = vec![0u8; MAX_BLOCK_SIZE + 1];
+        let data: BytesMut = vec![0u8; MAX_BLOCK_SIZE + 1].as_slice().into();
         assert!(
             codec
                 .encode(
@@ -464,7 +496,11 @@ mod tests {
         let mut codec = BittorrentCodec {};
         let mut buf = BytesMut::new();
         let bitfield = vec![0u8; MAX_BITFIELD_SIZE + 1];
-        assert!(codec.encode(Message::BitField(bitfield), &mut buf).is_err());
+        assert!(
+            codec
+                .encode(Message::BitField(bitfield.as_slice().into()), &mut buf)
+                .is_err()
+        );
     }
 
     #[test]
